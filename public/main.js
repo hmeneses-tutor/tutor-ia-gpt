@@ -329,7 +329,7 @@ ${avisoDiagnostico}
 
 <details>
   <summary style="cursor:pointer; color:#2563eb;">Ver JSON completo</summary>
-  <pre style="background:#0f172a; color:#e5e7eb; padding:8px; border-radius:4px; font-size:0.75rem; white-space:pre-wrap;">
+  <pre>
 ${JSON.stringify(data, null, 2)}
   </pre>
 </details>
@@ -610,7 +610,8 @@ function handleNewSession() {
 // ==========================
 function handleExportPdf() {
   const exercise = exerciseEl.value.trim();
-  const studentName = getStudentName().replace(/[\\/:*?"<>|]/g, '-');
+  const studentName = getStudentName();
+const safeStudentName = studentName.replace(/[\\/:*?"<>|]/g, '-');
   const date = new Date().toLocaleString();
   const dateFile = new Date().toISOString().slice(0, 10);
 
@@ -662,7 +663,7 @@ function handleExportPdf() {
     <html>
     <head>
       <meta charset="UTF-8" />
-      <title>Informe Tutor IA - ${studentName} - ${dateFile}</title>
+      <title>Informe Tutor IA - ${safeStudentName} - ${dateFile}</title>
 
       <style>
         body {
