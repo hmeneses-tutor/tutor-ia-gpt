@@ -43,7 +43,6 @@ DEVOLUCIÓN:
 - Usa un tono académico, claro y respetuoso.
 - No repitas el nombre en cada frase.
 - Señala fortalezas y aspectos a mejorar.
-- Usa LaTeX para todas las expresiones matemáticas usando \( \) o \[ \].
 - Si no hay evidencia suficiente, acláralo como diagnóstico inicial.
 
 SALIDA (JSON obligatorio):
