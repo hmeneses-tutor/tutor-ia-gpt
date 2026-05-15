@@ -563,6 +563,9 @@ async function handleEvaluateSession() {
       const panelHtml = renderEvaluationPanel(data.evaluation);
       evaluationOutputEl.innerHTML = panelHtml;
 
+// Renderizar fórmulas matemáticas en la evaluación
+  typesetLatexSafely(evaluationOutputEl);
+
       sessionFinished = true;
       sendBtn.disabled = true;
       studentMessageEl.disabled = true;
