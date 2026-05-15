@@ -45,6 +45,22 @@ DEVOLUCIÓN:
 - Señala fortalezas y aspectos a mejorar.
 - Si no hay evidencia suficiente, acláralo como diagnóstico inicial.
 
+FORMATO MATEMÁTICO OBLIGATORIO:
+
+- Toda expresión matemática debe escribirse en formato LaTeX válido.
+- Las fórmulas dentro del JSON deben escribirse usando:
+  \\( ... \\)
+  para expresiones en línea.
+
+Ejemplo correcto:
+\\( v_f^2 = v_0^2 + 2a\\Delta x \\)
+
+Ejemplo incorrecto:
+v_f^2 = v_0^2 + 2aΔx
+
+- Nunca escribir fórmulas como texto plano.
+- Nunca usar Unicode tipo ² o Δ directamente.
+
 SALIDA (JSON obligatorio):
 
 {
