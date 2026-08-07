@@ -6,6 +6,13 @@
 let messages = []; // { role: 'student' | 'tutor' | 'system', content: string }
 let currentMode = 'guiada'; // guiada | corta | diagnostico
 let sessionFinished = false; // se vuelve true al evaluar la sesión
+let exerciseImageDataUrl = ''; // captura/imagen del ejercicio en formato data URL
+let sessionStartedAt = null;
+let sessionEndedAt = null;
+let currentEvaluation = null;
+let sessionId = null;
+let autosaveTimer = null;
+let serverAutosaveTimer = null;
 
 // ==========================
 // Elementos del DOM
@@ -16,6 +23,12 @@ const studentMessageEl = document.getElementById('studentMessage');
 const statusEl = document.getElementById('status');
 const evaluationOutputEl = document.getElementById('evaluationOutput');
 const studentNameEl = document.getElementById('studentName');
+const exerciseImageDropzone = document.getElementById('exerciseImageDropzone');
+const exerciseImageInput = document.getElementById('exerciseImageInput');
+const exerciseImagePreview = document.getElementById('exerciseImagePreview');
+const exerciseImageEmpty = document.getElementById('exerciseImageEmpty');
+const selectExerciseImageBtn = document.getElementById('selectExerciseImageBtn');
+const removeExerciseImageBtn = document.getElementById('removeExerciseImageBtn');
 
 const sessionEndCardEl = document.getElementById('sessionEndCard');
 const sessionEndSummaryEl = document.getElementById('sessionEndSummary');
@@ -26,6 +39,9 @@ const saveSessionBtn = document.getElementById('saveSessionBtn');
 const evaluateSessionBtn = document.getElementById('evaluateSessionBtn');
 const exportPdfBtn = document.getElementById('exportPdfBtn');
 const finalExportPdfBtn = document.getElementById('finalExportPdfBtn');
+const restoreSessionBtn = document.getElementById('restoreSessionBtn');
+const discardSavedSessionBtn = document.getElementById('discardSavedSessionBtn');
+const autosaveNoticeEl = document.getElementById('autosaveNotice');
 
 const toggleThemeBtn = document.getElementById('toggleThemeBtn');
 const startTutorBtn = document.getElementById('startTutorBtn');
@@ -90,6 +106,306 @@ function getStudentName() {
   if (!studentNameEl) return 'Sin nombre';
   const name = studentNameEl.value.trim();
   return name ? name : 'Sin nombre';
+}
+
+// ==========================
+// Recuperación automática de sesión (borrador local)
+// ==========================
+const DRAFT_DB_NAME = 'TutorIAFisicaDB';
+const DRAFT_STORE = 'drafts';
+const CURRENT_DRAFT_KEY = 'current-session';
+const ACTIVE_SESSION_STORAGE_KEY = 'tutorIAActiveSessionId';
+
+function openDraftDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DRAFT_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DRAFT_STORE)) db.createObjectStore(DRAFT_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function writeDraft(state) {
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readwrite');
+    tx.objectStore(DRAFT_STORE).put(state, CURRENT_DRAFT_KEY);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function readDraft() {
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readonly');
+    const req = tx.objectStore(DRAFT_STORE).get(CURRENT_DRAFT_KEY);
+    req.onsuccess = () => { db.close(); resolve(req.result || null); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+async function clearDraft() {
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readwrite');
+    tx.objectStore(DRAFT_STORE).delete(CURRENT_DRAFT_KEY);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+function buildSessionState() {
+  return {
+    version: 2,
+    sessionId,
+    studentName: getStudentName(),
+    exercise: exerciseEl?.value || '',
+    exerciseImage: exerciseImageDataUrl || '',
+    mode: currentMode,
+    messages,
+    sessionFinished,
+    sessionStartedAt,
+    sessionEndedAt,
+    evaluation: currentEvaluation,
+    savedAt: new Date().toISOString()
+  };
+}
+
+function rememberActiveSessionId(id = sessionId) {
+  if (id) localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, id);
+}
+
+function forgetActiveSessionId() {
+  localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+}
+
+async function saveSessionToServer({ silent = true } = {}) {
+  if (!sessionStartedAt || !sessionId || messages.length === 0) return false;
+
+  const state = buildSessionState();
+  try {
+    const resp = await fetch('/api/save-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: state.sessionId,
+        studentName: state.studentName,
+        exercise: state.exercise,
+        exerciseImage: state.exerciseImage || null,
+        mode: state.mode,
+        messages: state.messages,
+        timestamp: new Date().toISOString(),
+        sessionStartedAt: state.sessionStartedAt,
+        sessionEndedAt: state.sessionEndedAt,
+        evaluation: state.evaluation,
+        sessionFinished: state.sessionFinished
+      })
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    if (data?.sessionId) {
+      sessionId = data.sessionId;
+      rememberActiveSessionId(sessionId);
+    }
+    if (!silent) setStatus('Sesión guardada correctamente en el servidor.');
+    return Boolean(data?.ok);
+  } catch (err) {
+    console.error('No se pudo guardar automáticamente en el servidor:', err);
+    if (!silent) setStatus('No se pudo guardar la sesión en el servidor.', true);
+    return false;
+  }
+}
+
+async function readServerSessionById(id) {
+  if (!id) return null;
+  try {
+    const resp = await fetch(`/api/session/${encodeURIComponent(id)}`);
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    return data?.session || null;
+  } catch (err) {
+    console.error('No se pudo recuperar la sesión desde el servidor:', err);
+    return null;
+  }
+}
+
+async function getRecoverableState() {
+  const localDraft = await readDraft().catch(() => null);
+  if (localDraft && !localDraft.sessionFinished && Array.isArray(localDraft.messages) && localDraft.messages.length > 0) {
+    return { state: localDraft, source: 'local' };
+  }
+  const activeId = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+  const serverDraft = await readServerSessionById(activeId);
+  if (serverDraft && !serverDraft.sessionFinished && Array.isArray(serverDraft.messages) && serverDraft.messages.length > 0) {
+    return { state: serverDraft, source: 'servidor' };
+  }
+  return null;
+}
+
+async function autosaveLocalNow() {
+  if (!sessionStartedAt && messages.length === 0) return;
+  try {
+    await writeDraft(buildSessionState());
+    if (autosaveNoticeEl) autosaveNoticeEl.textContent = 'Guardado automático activo';
+  } catch (err) {
+    console.error('No se pudo guardar el borrador local:', err);
+    if (autosaveNoticeEl) autosaveNoticeEl.textContent = 'No se pudo guardar automáticamente';
+  }
+}
+
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(autosaveLocalNow, 350);
+
+  // Copia de seguridad automática en el servidor. Se hace con más demora
+  // para evitar una escritura por cada tecla pulsada.
+  clearTimeout(serverAutosaveTimer);
+  serverAutosaveTimer = setTimeout(() => saveSessionToServer({ silent: true }), 1800);
+}
+
+function renderMessagesFromState() {
+  chatEl.innerHTML = '';
+  messages.forEach(m => appendMessage(m.role, m.content));
+}
+
+async function restoreSavedDraft() {
+  try {
+    const recoverable = await getRecoverableState();
+    if (!recoverable) {
+      setStatus('No hay una sesión pendiente para recuperar.', true);
+      return;
+    }
+    const draft = recoverable.state;
+    sessionId = draft.sessionId || null;
+    studentNameEl.value = draft.studentName && draft.studentName !== 'Sin nombre' ? draft.studentName : '';
+    persistStudentIdentity();
+    exerciseEl.value = draft.exercise || '';
+    exerciseImageDataUrl = draft.exerciseImage || '';
+    currentMode = draft.mode || 'guiada';
+    messages = Array.isArray(draft.messages) ? draft.messages : [];
+    sessionFinished = Boolean(draft.sessionFinished);
+    sessionStartedAt = draft.sessionStartedAt || null;
+    sessionEndedAt = draft.sessionEndedAt || null;
+    currentEvaluation = draft.evaluation || null;
+
+    modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === currentMode));
+    updateExerciseImageUI();
+    renderMessagesFromState();
+
+    evaluationOutputEl.innerHTML = currentEvaluation ? renderEvaluationPanel(currentEvaluation) : '(Aquí aparecerá la evaluación de la sesión)';
+    if (currentEvaluation) typesetLatexSafely(evaluationOutputEl);
+    sendBtn.disabled = sessionFinished;
+    studentMessageEl.disabled = sessionFinished;
+    evaluateSessionBtn.disabled = sessionFinished;
+    if (sessionFinished) showSessionEndCard(); else hideSessionEndCard();
+    setStatus(`Sesión recuperada desde ${recoverable.source}. Puedes continuar donde la dejaste.`);
+    if (autosaveNoticeEl) autosaveNoticeEl.textContent = 'Sesión recuperada · guardado automático activo';
+  } catch (err) {
+    console.error('Error recuperando sesión:', err);
+    setStatus('No se pudo recuperar la sesión guardada.', true);
+  }
+}
+
+async function discardSavedDraft() {
+  await clearDraft().catch(console.error);
+  forgetActiveSessionId();
+  if (restoreSessionBtn) restoreSessionBtn.classList.add('hidden');
+  if (discardSavedSessionBtn) discardSavedSessionBtn.classList.add('hidden');
+  if (autosaveNoticeEl) autosaveNoticeEl.textContent = 'Guardado automático activo';
+  setStatus('Borrador anterior descartado.');
+}
+
+async function checkForRecoverableDraft() {
+  try {
+    const recoverable = await getRecoverableState();
+    const hasRecoverable = Boolean(recoverable);
+    if (restoreSessionBtn) restoreSessionBtn.classList.toggle('hidden', !hasRecoverable);
+    if (discardSavedSessionBtn) discardSavedSessionBtn.classList.toggle('hidden', !hasRecoverable);
+    if (autosaveNoticeEl) autosaveNoticeEl.textContent = hasRecoverable
+      ? `Hay una sesión anterior sin finalizar disponible para recuperar (${recoverable.source})`
+      : 'Guardado automático activo';
+  } catch (err) {
+    console.error('No se pudo comprobar el borrador:', err);
+  }
+}
+
+// ==========================
+// Imagen/captura del ejercicio
+// ==========================
+const MAX_IMAGE_DIMENSION = 1800;
+const IMAGE_JPEG_QUALITY = 0.92;
+
+function updateExerciseImageUI() {
+  const hasImage = Boolean(exerciseImageDataUrl);
+  if (exerciseImagePreview) {
+    exerciseImagePreview.src = hasImage ? exerciseImageDataUrl : '';
+    exerciseImagePreview.classList.toggle('hidden', !hasImage);
+  }
+  if (exerciseImageEmpty) exerciseImageEmpty.classList.toggle('hidden', hasImage);
+  if (removeExerciseImageBtn) removeExerciseImageBtn.classList.toggle('hidden', !hasImage);
+}
+
+function clearExerciseImage() {
+  exerciseImageDataUrl = '';
+  if (exerciseImageInput) exerciseImageInput.value = '';
+  updateExerciseImageUI();
+  scheduleAutosave();
+}
+
+function fileToOptimizedDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type?.startsWith('image/')) {
+      reject(new Error('El archivo seleccionado no es una imagen válida.'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer la imagen.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('No se pudo procesar la imagen.'));
+      img.onload = () => {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+        const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(width, height));
+        width = Math.max(1, Math.round(width * scale));
+        height = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function setExerciseImageFromFile(file) {
+  try {
+    setStatus('Procesando imagen del ejercicio...');
+    exerciseImageDataUrl = await fileToOptimizedDataUrl(file);
+    updateExerciseImageUI();
+    scheduleAutosave();
+    setStatus('Imagen del ejercicio cargada correctamente.');
+  } catch (err) {
+    console.error('Error procesando imagen:', err);
+    setStatus(err.message || 'No se pudo cargar la imagen.', true);
+  }
+}
+
+function getClipboardImageFile(event) {
+  const items = Array.from(event.clipboardData?.items || []);
+  const imageItem = items.find(item => item.type?.startsWith('image/'));
+  return imageItem ? imageItem.getAsFile() : null;
 }
 
 function hideSessionEndCard() {
@@ -344,6 +660,7 @@ modeButtons.forEach(btn => {
     modeButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentMode = btn.dataset.mode || 'guiada';
+    scheduleAutosave();
     setStatus(`Modo del tutor: ${currentMode}`, false);
   });
 });
@@ -356,8 +673,8 @@ async function callTutor(customMessages) {
   const mode = currentMode;
   const payloadMessages = customMessages ?? messages;
 
-  if (!exercise) {
-    setStatus('Por favor ingresa el enunciado del ejercicio.', true);
+  if (!exercise && !exerciseImageDataUrl) {
+    setStatus('Ingresa el enunciado o pega/selecciona una imagen del ejercicio.', true);
     return null;
   }
 
@@ -369,6 +686,7 @@ async function callTutor(customMessages) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         exercise,
+        exerciseImage: exerciseImageDataUrl || null,
         messages: payloadMessages,
         mode,
         studentName: getStudentName()
@@ -418,6 +736,11 @@ async function handleStartTutor() {
 
   messages = [];
   sessionFinished = false;
+  sessionStartedAt = new Date().toISOString();
+  sessionEndedAt = null;
+  currentEvaluation = null;
+  sessionId = (crypto.randomUUID ? crypto.randomUUID() : `ses-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  rememberActiveSessionId(sessionId);
   chatEl.innerHTML = '';
   evaluationOutputEl.innerHTML = '(Aquí aparecerá la evaluación de la sesión)';
   hideSessionEndCard();
@@ -431,6 +754,7 @@ async function handleStartTutor() {
 
   messages.push({ role: 'tutor', content: textoTutor });
   appendMessage('tutor', textoTutor);
+  scheduleAutosave();
 }
 
 // ==========================
@@ -450,6 +774,7 @@ async function handleSend() {
 
   messages.push({ role: 'student', content: studentText });
   appendMessage('student', studentText);
+  scheduleAutosave();
   studentMessageEl.value = '';
 
   const textoTutor = await callTutor();
@@ -457,6 +782,7 @@ async function handleSend() {
 
   messages.push({ role: 'tutor', content: textoTutor });
   appendMessage('tutor', textoTutor);
+  scheduleAutosave();
 }
 
 // ==========================
@@ -465,8 +791,8 @@ async function handleSend() {
 async function handleSaveSession() {
   const exercise = exerciseEl.value.trim();
 
-  if (!exercise) {
-    setStatus('No hay enunciado para guardar.', true);
+  if (!exercise && !exerciseImageDataUrl) {
+    setStatus('No hay enunciado ni imagen para guardar.', true);
     return;
   }
 
@@ -475,39 +801,10 @@ async function handleSaveSession() {
     return;
   }
 
-  try {
-    setStatus('Guardando sesión en el servidor...');
-
-    const resp = await fetch('/api/save-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        studentName: getStudentName(),
-        exercise,
-        mode: currentMode,
-        messages,
-        timestamp: new Date().toISOString(),
-        sessionFinished
-      })
-    });
-
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      console.error('Error en /api/save-session:', errorText);
-      setStatus('Error al guardar la sesión.', true);
-      return;
-    }
-
-    const data = await resp.json();
-    if (data.ok) {
-      setStatus('Sesión guardada en el servidor (carpeta /sessions).');
-    } else {
-      setStatus('El servidor respondió pero no confirmó el guardado.', true);
-    }
-  } catch (err) {
-    console.error('Error de red en /api/save-session:', err);
-    setStatus('Error de red al guardar la sesión.', true);
-  }
+  setStatus('Guardando sesión en el servidor...');
+  await autosaveLocalNow();
+  const ok = await saveSessionToServer({ silent: false });
+  if (ok && autosaveNoticeEl) autosaveNoticeEl.textContent = 'Guardado local y en servidor activo';
 }
 
 // ==========================
@@ -521,8 +818,8 @@ async function handleEvaluateSession() {
 
   const exercise = exerciseEl.value.trim();
 
-  if (!exercise) {
-    setStatus('No hay enunciado para evaluar.', true);
+  if (!exercise && !exerciseImageDataUrl) {
+    setStatus('No hay enunciado ni imagen para evaluar.', true);
     return;
   }
 
@@ -544,8 +841,10 @@ async function handleEvaluateSession() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        sessionId,
         studentName: getStudentName(),
         exercise,
+        exerciseImage: exerciseImageDataUrl || null,
         messages
       })
     });
@@ -560,6 +859,8 @@ async function handleEvaluateSession() {
     const data = await resp.json();
 
     if (data.ok && data.evaluation) {
+      currentEvaluation = data.evaluation;
+      sessionEndedAt = new Date().toISOString();
       const panelHtml = renderEvaluationPanel(data.evaluation);
       evaluationOutputEl.innerHTML = panelHtml;
 
@@ -578,6 +879,8 @@ async function handleEvaluateSession() {
 
       setStatus('Evaluación recibida. La sesión quedó cerrada.');
       showSessionEndCard();
+      await autosaveLocalNow();
+      await saveSessionToServer({ silent: true });
     } else if (data.raw) {
       evaluationOutputEl.textContent =
         'La IA no devolvió un JSON válido. Respuesta cruda:\n\n' + data.raw;
@@ -592,13 +895,21 @@ async function handleEvaluateSession() {
   }
 }
 
-function handleNewSession() {
+async function handleNewSession() {
   messages = [];
   sessionFinished = false;
+  sessionStartedAt = null;
+  sessionEndedAt = null;
+  currentEvaluation = null;
+  sessionId = null;
+  forgetActiveSessionId();
+  await clearDraft().catch(console.error);
 
   chatEl.innerHTML = '';
   evaluationOutputEl.innerHTML = '(Aquí aparecerá la evaluación de la sesión)';
   studentMessageEl.value = '';
+  exerciseEl.value = '';
+  clearExerciseImage();
 
   sendBtn.disabled = false;
   studentMessageEl.disabled = false;
@@ -615,8 +926,17 @@ function handleExportPdf() {
   const exercise = exerciseEl.value.trim();
   const studentName = getStudentName();
 const safeStudentName = studentName.replace(/[\\/:*?"<>|]/g, '-');
-  const date = new Date().toLocaleString();
-  const dateFile = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const startDate = sessionStartedAt ? new Date(sessionStartedAt) : now;
+  const endDate = sessionEndedAt ? new Date(sessionEndedAt) : null;
+  const date = startDate.toLocaleDateString();
+  const startTime = startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const endTime = endDate ? endDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+  const dateFile = startDate.toISOString().slice(0, 10);
+  const notaGlobal = currentEvaluation?.nota_global;
+  const notaUTEC = Number.isFinite(Number(notaGlobal)) ? convertirPorcentajeUTEC(Number(notaGlobal)) : null;
+  const conceptoUTEC = notaUTEC !== null ? getConceptoUTEC(notaUTEC) : '';
+  const calificacionHeader = notaUTEC !== null ? `${notaGlobal}/100 · UTEC ${notaUTEC.toFixed(2)} (${conceptoUTEC})` : 'Pendiente';
 
   const modeMap = {
     guiada: 'Guía paso a paso',
@@ -719,6 +1039,18 @@ const safeStudentName = studentName.replace(/[\\/:*?"<>|]/g, '-');
           border-radius: 6px;
           background: #fafafa;
         }
+
+        .exercise-image-pdf {
+          margin: 10px 0 14px 0;
+          text-align: center;
+          break-inside: avoid;
+        }
+
+        .exercise-image-pdf img {
+          max-width: 100%;
+          max-height: 520px;
+          object-fit: contain;
+        }
       </style>
 
       <script>
@@ -739,13 +1071,17 @@ const safeStudentName = studentName.replace(/[\\/:*?"<>|]/g, '-');
         <div class="header-grid">
           <p><span class="label">Estudiante:</span> ${studentName}</p>
           <p><span class="label">Fecha:</span> ${date}</p>
+          <p><span class="label">Calificación:</span> ${calificacionHeader}</p>
+          <p><span class="label">Hora de comienzo:</span> ${startTime}</p>
+          <p><span class="label">Hora de finalización:</span> ${endTime}</p>
           <p><span class="label">Modo:</span> ${modeLabel}</p>
           <p><span class="label">Estado:</span> ${estado}</p>
         </div>
       </div>
 
       <h2>1. Enunciado del ejercicio</h2>
-      <p>${exercise ? exercise.replace(/\\n/g, '<br>') : '(Sin enunciado)'}</p>
+      <p>${exercise ? exercise.replace(/\\n/g, '<br>') : (exerciseImageDataUrl ? '(El enunciado está contenido en la imagen)' : '(Sin enunciado)')}</p>
+      ${exerciseImageDataUrl ? `<div class="exercise-image-pdf"><img src="${exerciseImageDataUrl}" alt="Imagen del ejercicio"></div>` : ''}
 
       <h2>2. Desarrollo de la interacción</h2>
       ${htmlChat || '<p>(Sin mensajes)</p>'}
@@ -800,9 +1136,61 @@ exportPdfBtn.addEventListener('click', handleExportPdf);
 toggleThemeBtn.addEventListener('click', toggleTheme);
 startTutorBtn.addEventListener('click', handleStartTutor);
 
-if (studentNameEl) {
-  studentNameEl.addEventListener('input', persistStudentIdentity);
+if (selectExerciseImageBtn && exerciseImageInput) {
+  selectExerciseImageBtn.addEventListener('click', () => exerciseImageInput.click());
+  exerciseImageInput.addEventListener('change', () => {
+    const file = exerciseImageInput.files?.[0];
+    if (file) setExerciseImageFromFile(file);
+  });
 }
+
+if (removeExerciseImageBtn) removeExerciseImageBtn.addEventListener('click', clearExerciseImage);
+
+if (exerciseImageDropzone) {
+  exerciseImageDropzone.addEventListener('click', () => exerciseImageInput?.click());
+  exerciseImageDropzone.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      exerciseImageInput?.click();
+    }
+  });
+  exerciseImageDropzone.addEventListener('dragover', e => {
+    e.preventDefault();
+    exerciseImageDropzone.classList.add('dragover');
+  });
+  exerciseImageDropzone.addEventListener('dragleave', () => exerciseImageDropzone.classList.remove('dragover'));
+  exerciseImageDropzone.addEventListener('drop', e => {
+    e.preventDefault();
+    exerciseImageDropzone.classList.remove('dragover');
+    const file = Array.from(e.dataTransfer?.files || []).find(f => f.type?.startsWith('image/'));
+    if (file) setExerciseImageFromFile(file);
+  });
+  exerciseImageDropzone.addEventListener('paste', e => {
+    const file = getClipboardImageFile(e);
+    if (!file) return;
+    e.preventDefault();
+    setExerciseImageFromFile(file);
+  });
+}
+
+if (exerciseEl) {
+  exerciseEl.addEventListener('paste', e => {
+    const file = getClipboardImageFile(e);
+    if (!file) return;
+    e.preventDefault();
+    setExerciseImageFromFile(file);
+  });
+}
+
+if (studentNameEl) {
+  studentNameEl.addEventListener('input', () => { persistStudentIdentity(); scheduleAutosave(); });
+}
+
+if (exerciseEl) exerciseEl.addEventListener('input', scheduleAutosave);
+if (studentMessageEl) studentMessageEl.addEventListener('input', scheduleAutosave);
+if (restoreSessionBtn) restoreSessionBtn.addEventListener('click', restoreSavedDraft);
+if (discardSavedSessionBtn) discardSavedSessionBtn.addEventListener('click', discardSavedDraft);
+window.addEventListener('pagehide', () => { autosaveLocalNow(); });
 
 mathSymbolButtons.forEach(btn => {
   btn.addEventListener('click', () => {
@@ -839,4 +1227,6 @@ if (finalExportPdfBtn) {
 // ==========================
 initTheme();
 loadStudentIdentity();
+updateExerciseImageUI();
 hideSessionEndCard();
+checkForRecoverableDraft();

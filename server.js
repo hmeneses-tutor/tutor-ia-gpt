@@ -22,7 +22,7 @@ if (!AZURE_OPENAI_ENDPOINT) {
   process.exit(1);
 }
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PROMPTS_DIR = path.join(__dirname, 'prompts');
@@ -68,8 +68,26 @@ function normalizeEndpoint(endpoint) {
   return endpoint.endsWith('/') ? endpoint : `${endpoint}/`;
 }
 
-async function callAzureChat(prompt) {
+function isValidExerciseImage(imageDataUrl) {
+  if (!imageDataUrl) return false;
+  return /^data:image\/(png|jpeg|jpg|webp);base64,/i.test(String(imageDataUrl));
+}
+
+async function callAzureChat(prompt, imageDataUrl = null) {
   const url = `${normalizeEndpoint(AZURE_OPENAI_ENDPOINT)}chat/completions`;
+
+  const userContent = imageDataUrl
+    ? [
+        { type: 'text', text: prompt },
+        {
+          type: 'image_url',
+          image_url: {
+            url: imageDataUrl,
+            detail: 'high',
+          },
+        },
+      ]
+    : prompt;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -83,11 +101,11 @@ async function callAzureChat(prompt) {
         {
           role: 'developer',
           content:
-            'Eres un tutor universitario de física. Responde siempre en español claro, útil y pedagógico.',
+            'Eres un tutor universitario de física. Responde siempre en español claro, útil y pedagógico. Si se adjunta una imagen, interprétala cuidadosamente: puede contener el enunciado completo, datos numéricos, gráficos, diagramas, circuitos, tablas o figuras. No inventes datos que no sean legibles; si algo de la imagen es ambiguo, pide al estudiante que lo confirme.',
         },
         {
           role: 'user',
-          content: prompt,
+          content: userContent,
         },
       ],
     }),
@@ -105,16 +123,17 @@ async function callAzureChat(prompt) {
   return data?.choices?.[0]?.message?.content?.trim() || '';
 }
 
-async function generateText(prompt) {
-  return callAzureChat(prompt);
+async function generateText(prompt, imageDataUrl = null) {
+  return callAzureChat(prompt, imageDataUrl);
 }
 
 app.post('/api/tutor', async (req, res) => {
   try {
-    const { exercise, messages, mode, studentName } = req.body;
+    const { exercise, exerciseImage, messages, mode, studentName } = req.body;
 
-    if (!exercise) {
-      return res.status(400).json({ error: 'Falta el enunciado del ejercicio.' });
+    const hasImage = isValidExerciseImage(exerciseImage);
+    if (!exercise && !hasImage) {
+      return res.status(400).json({ error: 'Falta el enunciado o una imagen del ejercicio.' });
     }
 
     const historyText = buildHistoryText(messages);
@@ -136,12 +155,12 @@ app.post('/api/tutor', async (req, res) => {
       ].join('\n');
 
     const fullPrompt = basePrompt
-      .replace('{{ENUNCIADO}}', exercise)
+      .replace('{{ENUNCIADO}}', exercise || '[El enunciado completo está contenido en la imagen adjunta. Lee tanto el texto como la figura.]')
       .replace('{{HISTORIAL}}', historyText)
       .replace('{{MENSAJE_ESTUDIANTE}}', lastStudentMessage)
       .replace('{{ESTUDIANTE}}', studentName || 'Estudiante');
 
-    const text = await generateText(fullPrompt);
+    const text = await generateText(fullPrompt, hasImage ? exerciseImage : null);
 
     res.json({ text });
   } catch (err) {
@@ -170,9 +189,10 @@ app.post('/api/tutor', async (req, res) => {
 
 app.post('/api/evaluate', async (req, res) => {
   try {
-    const { exercise, messages, studentName } = req.body;
+    const { exercise, exerciseImage, messages, studentName } = req.body;
 
-    if (!exercise || !messages || messages.length === 0) {
+    const hasImage = isValidExerciseImage(exerciseImage);
+    if ((!exercise && !hasImage) || !messages || messages.length === 0) {
       return res.status(400).json({ error: 'Faltan datos para evaluar.' });
     }
 
@@ -188,11 +208,11 @@ app.post('/api/evaluate', async (req, res) => {
       ].join('\n');
 
     const evalPrompt = baseEvalPrompt
-      .replace('{{ENUNCIADO}}', exercise)
+      .replace('{{ENUNCIADO}}', exercise || '[El enunciado completo está contenido en la imagen adjunta.]')
       .replace('{{CONVERSACION}}', historyText)
       .replace('{{ESTUDIANTE}}', studentName || 'Estudiante');
 
-    let text = await generateText(evalPrompt);
+    let text = await generateText(evalPrompt, hasImage ? exerciseImage : null);
     text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -235,21 +255,43 @@ app.post('/api/save-session', (req, res) => {
       .replace(/\s+/g, '_')
       .replace(/[^\w\-áéíóúÁÉÍÓÚñÑ]/g, '');
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const suppliedSessionId = String(req.body?.sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const sessionId = suppliedSessionId || `ses-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const filename = path.join(
       sessionsDir,
-      `sesion-${safeStudentName || 'Sin_nombre'}-${timestamp}.json`
+      `sesion-${safeStudentName || 'Sin_nombre'}-${sessionId}.json`
     );
 
-    fs.writeFileSync(filename, JSON.stringify(req.body, null, 2), 'utf8');
+    fs.writeFileSync(filename, JSON.stringify({ ...req.body, sessionId }, null, 2), 'utf8');
 
-    res.json({ ok: true, file: filename });
+    res.json({ ok: true, file: filename, sessionId });
   } catch (err) {
     console.error('Error guardando sesión:', err);
     res.status(500).json({
       error: 'Error guardando',
       detail: err.message,
     });
+  }
+});
+
+app.get('/api/session/:sessionId', (req, res) => {
+  try {
+    const sessionsDir = path.join(__dirname, 'sessions');
+    const sessionId = String(req.params.sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!sessionId || !fs.existsSync(sessionsDir)) {
+      return res.status(404).json({ error: 'Sesión no encontrada' });
+    }
+
+    const suffix = `-${sessionId}.json`;
+    const file = fs.readdirSync(sessionsDir).find(name => name.endsWith(suffix));
+    if (!file) return res.status(404).json({ error: 'Sesión no encontrada' });
+
+    const fullPath = path.join(sessionsDir, file);
+    const session = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+    res.json({ ok: true, session });
+  } catch (err) {
+    console.error('Error recuperando sesión:', err);
+    res.status(500).json({ error: 'Error recuperando sesión', detail: err.message });
   }
 });
 

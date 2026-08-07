@@ -147,6 +147,98 @@ body.dark-mode .textarea-enunciado {
   border-color: #374151;
 }
 
+/* ===== Imagen/captura del ejercicio ===== */
+.exercise-image-section h3 {
+  margin: 0 0 6px 0;
+  font-size: 0.95rem;
+}
+
+.optional-label {
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.image-dropzone {
+  min-height: 118px;
+  border: 2px dashed #94a3b8;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+  overflow: hidden;
+}
+
+.image-dropzone:hover,
+.image-dropzone:focus,
+.image-dropzone.dragover {
+  outline: none;
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.image-dropzone-empty {
+  text-align: center;
+  color: #475569;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.image-dropzone-subtext {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.74rem;
+  color: #64748b;
+}
+
+.exercise-image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 230px;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.image-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.image-actions .btn {
+  padding: 5px 10px;
+}
+
+.image-hint {
+  margin: 6px 0 0 0;
+}
+
+.hidden {
+  display: none !important;
+}
+
+body.dark-mode .image-dropzone {
+  background: #0f172a;
+  border-color: #475569;
+}
+
+body.dark-mode .image-dropzone:hover,
+body.dark-mode .image-dropzone:focus,
+body.dark-mode .image-dropzone.dragover {
+  background: #172554;
+  border-color: #60a5fa;
+}
+
+body.dark-mode .image-dropzone-empty,
+body.dark-mode .image-dropzone-subtext,
+body.dark-mode .optional-label {
+  color: #cbd5e1;
+}
+
 .sidebar-section h3 {
   margin: 4px 0;
   font-size: 0.95rem;
